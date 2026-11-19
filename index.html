@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SensorLab to SENSORS.CFG</title>
+<style>
+  :root { --bg: #fafaf8; --fg: #1d1d1b; --muted: #6b6b66; --line: #d9d9d3; --accent: #2a5db0; --bad: #b3261e; --box: #ffffff; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #161615; --fg: #ecece8; --muted: #a0a09a; --line: #3a3a37; --accent: #8ab4f8; --bad: #f2b8b5; --box: #1f1f1d; }
+  }
+  :root[data-theme="dark"] { --bg: #161615; --fg: #ecece8; --muted: #a0a09a; --line: #3a3a37; --accent: #8ab4f8; --bad: #f2b8b5; --box: #1f1f1d; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 40px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { margin: 6px 0; color: var(--muted); }
+  label { display: block; margin: 16px 0 6px; font-weight: 600; }
+  textarea, input { width: 100%; box-sizing: border-box; background: var(--box); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px; font: 13px/1.4 ui-monospace, Menlo, monospace; }
+  textarea#in { min-height: 110px; }
+  input#id { max-width: 12em; text-transform: uppercase; }
+  pre { background: var(--box); border: 1px solid var(--line); border-radius: 6px; padding: 12px; overflow-x: auto;
+    font: 12.5px/1.45 ui-monospace, Menlo, monospace; white-space: pre; min-height: 3em; }
+  .err { color: var(--bad); white-space: pre-wrap; }
+  button { margin-top: 10px; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: transparent;
+    color: var(--accent); font: inherit; cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SensorLab → SENSORS.CFG</h1>
+  <p>Paste SensorLab codes or addresses (the camera's QR code, or the web page's address), one per line.
+     Codes with the same crop and recorded size become one section (a 12-bit and a 14-bit code: readout 12 and readout 14).
+     Everything runs in this page.</p>
+  <label for="in">Codes or addresses</label>
+  <textarea id="in" spellcheck="false" placeholder="https://ijigen.github.io/fpSup/sensor_lab_imx410/#…"></textarea>
+  <label for="id">Section id (optional, 1–8 of A–Z 0–9 _)</label>
+  <input id="id" spellcheck="false" maxlength="8">
+  <label>Section, to add to SENSORS.CFG</label>
+  <pre id="out"></pre>
+  <div id="err" class="err"></div>
+  <button id="copy" type="button">Copy</button>
+</main>
+<script>
+/* qr2cfg.py in JavaScript: same layout, CRC, meaning and output text (tests/test_qr2cfg.py checks both). */
+const QR2CFG = (() => {
+  const QR_FIELDS = [['ver',4],['dcw',13],['dch',12],['rw',13],['rh',12],['fps',5],['vmax',15],['hmax',16],['ad',2],['mh',2],
+    ['mv',3],['hbin',4],['vbin',4],['key',6],['kh',3],['kv',3],['km',1],['rcustom',1],['visw',13],['vish',12],['rs',17],
+    ['fmt',1],['rescustom',1],['scw',13],['sch',12],['ww',13],['wh',12]];
+  const NBITS = QR_FIELDS.reduce((a, f) => a + f[1], 0), NCHARS = Math.ceil((NBITS + 8) / 6);
+  const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const KEY_NAMES = ['14','12','12fast','12fastW','2x2','2x2fast','3x3','3x3fast','3x6','3x6fast','12v2','12v3','12h2','12h3',
+    '12h2v3','12h3v2','f12v2','f12v3','f12h2','f12h3','f12h2v3','f12h3v2','14v2','14v3','12w18','f12w18','12w03','f12w03',
+    '12w2C','f12v2w18','f12v2w2C','f12v3w18','f12v3w2C','12v2w18','12v2w2C','12v3w18','12v3w2C','14w2B','14v2w2B','14v3w2B'];
+  const KERNELS = ['1,1,1', '1,2,1', '1,4,1', '1,6,1', '1,14,1', '0,1,0'];
+  const STD = [23.976, 24, 25, 29.97, 30, 47.952, 48, 50, 59.94, 60, 72, 90, 96, 100, 119.88, 120, 144, 150, 180, 200,
+    239.76, 240, 300, 360, 400, 480, 500, 600, 1000];
+  const DCS = [['OG',6048,4040],['HD',6048,3402],['S35',4192,2358],['APS-C',3952,2624],['S16',2096,1240],['SQ',4032,4032]];
+  const CFG_RATES = [23.976, 24, 25, 29.97, 48, 50, 59.94, 100, 119.88];
+  const CLK = 72e6, DIMS = ['dcw','dch','rw','rh','scw','sch','ww','wh','visw','vish'];
+  const CROP_W = 16, CROP_H = 4, CROP_FOV = [3, 200], VCROP = 12, VMARGIN = 4992;
+  const fl = Math.floor;
+  class CodeError extends Error {}
+
+  const crc8 = bits => { let c = 0; for (const b of bits) { const top = (c >> 7) ^ b; c = (c << 1) & 0xFF; if (top) c ^= 0x07; } return c; };
+  const codeOf = t => { t = t.trim(); if (t.includes('#')) t = t.slice(t.lastIndexOf('#') + 1); return t.trim(); };
+  function decode(code) {
+    if (code.length !== NCHARS) throw new CodeError(`length: ${code.length} characters, a code has ${NCHARS}`);
+    if (/[^A-Za-z0-9_-]/.test(code)) throw new CodeError('chars: only A-Z a-z 0-9 - _ are in a code');
+    const bits = [...code].flatMap(ch => { const v = B64.indexOf(ch); return [5, 4, 3, 2, 1, 0].map(i => v >> i & 1); });
+    let pos = 0; const take = n => { let v = 0; for (let i = 0; i < n; i++) v = v * 2 + bits[pos++]; return v; };
+    const f = {}; for (const [k, n] of QR_FIELDS) f[k] = take(n);
+    if (take(8) !== crc8(bits.slice(0, NBITS))) throw new CodeError('crc: the code is mistyped or cut');
+    if (bits.slice(pos).some(b => b)) throw new CodeError('pad');
+    if (f.ver !== 1) throw new CodeError(`version: code version ${f.ver}, this tool reads 1`);
+    if (!(f.ad < 3 && f.fps < 31 && f.kh < KERNELS.length && f.kv < KERNELS.length && f.hmax && f.vmax && f.mh && f.mv &&
+          f.hbin && f.vbin && DIMS.every(k => f[k] > 0))) throw new CodeError('field: a value is out of range');
+    if (f.key >= KEY_NAMES.length) throw new CodeError(`field: readout key ${f.key} unknown`);
+    return f;
+  }
+  const cropOk = (b, n, o, lim) => b - o >= 0 && b - o <= lim && CROP_FOV[1] * Math.max(n - o, 0) <= CROP_FOV[0] * n;
+  function vmargin(winH, vbin, zh, zv, recH) {
+    if (zh <= 1024 && zv <= 1024) return null;
+    const R = fl(winH / vbin), z = Math.max(zv, 1024);
+    const est = z > 1024 ? fl((fl(z / 2) + R * 1024) / z) : R;
+    const y0 = est > recH ? fl((est - recH) / 4) * 2 : 0;
+    return R * 1024 - (y0 + recH) * z;
+  }
+  function ispZoom(f) {
+    const nw = fl(f.dcw / f.mh), nh = fl(f.dch / f.mv / 2) * 2, bw = Math.max(f.ww, nw), bh = Math.max(f.wh, nh);
+    if (f.hbin === 1 && f.vbin === 1 && cropOk(bw, nw, f.rw, CROP_W) && cropOk(bh, nh, f.rh, CROP_H)) return [1024, 1024];
+    const z = (src, bin, dst) => { const n = fl(fl(src / bin) * 1024 / dst); return n < 1026 ? 1024 : n; };
+    let h = f.hbin === 3 || bw > f.rw ? z(bw, f.hbin, f.rw) : 1024;
+    let v = f.vbin === 3 || bh > f.rh ? z(bh, f.vbin, f.rh) : 1024;
+    if (v > 1024 && (h > 1024 || f.hbin === 3 || f.vbin === 3)) {
+      const d = f.mv * f.vbin, R = fl(f.wh / f.vbin), zm = Math.max(h, 1025);
+      for (const t of [fl((h * f.mh * f.hbin + fl(d / 2)) / d), 1024]) {
+        if (t < 1024 || t >= v) continue;
+        const est = t > 1024 ? fl((fl(t / 2) + R * 1024) / t) : R;
+        if (est - f.rh > 0 && est - f.rh <= VCROP && vmargin(f.wh, f.vbin, zm, t, f.rh) >= VMARGIN) { v = t; break; }
+      }
+    }
+    if ((f.hbin === 3 || f.vbin === 3) && h === 1024 && v === 1024) h = v = 1025;
+    const recH = f.vish + 10, m = vmargin(f.wh, f.vbin, h, v, recH);
+    if (m !== null && m < VMARGIN && h > 1024 && v > 1024)
+      for (let k = v - 1; k > 1024; k--) {
+        if (vmargin(f.wh, f.vbin, h, k, recH) < VMARGIN) continue;
+        const g = fl((h * k + fl(v / 2)) / v);
+        if (g <= 1024) break;
+        return [g, k];
+      }
+    return [h, v];
+  }
+  function describe(f) {
+    const zoom = ispZoom(f), ad = [11, 12, 14, 12][f.ad];
+    const rb = ad === 14 && zoom[0] === 1024 && zoom[1] === 1024 && f.hbin === 1 && f.vbin === 1 ? 14 : 12;
+    const fps = CLK / (f.hmax * f.vmax);
+    return Object.assign({}, f, {zoom, ad_bits: ad, record_bits: rb, fps_exact: fps,
+      fps_text: f.fps < 29 ? String(STD[f.fps]) : fps.toFixed(3),
+      fps_how: ({29: 'fine-tuned', 30: "a recipe's fastest"})[f.fps] || 'standard',
+      rec: [f.visw + 16, f.vish + 10], vis: [f.visw, f.vish], readout: KEY_NAMES[f.key],
+      dc_name: (DCS.find(d => d[1] === f.dcw && d[2] === f.dch) || ['Custom'])[0]});
+  }
+  const kLabel = w => { const k = Math.round(w / 1024 * 2) / 2; return String(k).replace('.', '') + 'K'; };
+  const defaultId = d => (({'APS-C': 'APSC', Custom: 'C'})[d.dc_name] ?? d.dc_name) + kLabel(d.rec[0]);
+  const frameVmax = (hmax, rate) => Math.round(CLK / (hmax * rate));
+  function rateText(d) {
+    if (d.fps < 29 && CFG_RATES.includes(STD[d.fps])) return null;
+    for (let p = 3; p < 7; p++) { const t = d.fps_exact.toFixed(p); if (frameVmax(d.hmax, Number(t)) === d.vmax) return t; }
+    return d.fps_exact.toFixed(6);
+  }
+  function sections(ds, firstId) {
+    const groups = [];
+    for (const d of ds) {
+      const key = [d.dcw, d.dch, d.rec[0], d.rec[1]].join(',');
+      const g = groups.find(g => g[0] === key); if (g) g[1].push(d); else groups.push([key, [d]]);
+    }
+    const out = [], used = new Set();
+    groups.forEach(([, g], i) => {
+      let sid = firstId ? (i === 0 ? firstId.toUpperCase() : firstId.toUpperCase().slice(0, 7) + (i + 1)) : defaultId(g[0]).slice(0, 8);
+      let n = 2; while (used.has(sid)) sid = sid.slice(0, 7) + n++;
+      used.add(sid); out.push([sid, g]);
+    });
+    return out;
+  }
+  const ljust = (s, n) => s.length >= n ? s : s + ' '.repeat(n - s.length);
+  function sectionText(sid, ds) {
+    const slots = new Map();
+    for (const d of ds) { if (!slots.has(d.record_bits)) slots.set(d.record_bits, []); slots.get(d.record_bits).push(d); }
+    for (const [bits, lst] of slots)
+      if (new Set(lst.map(x => [x.hbin, x.vbin, x.kh, x.kv, x.km].join())).size > 1)
+        throw new CodeError(`[${sid}] ${bits}-bit: two codes with different ISP settings; give them their own --id`);
+    const d0 = ds[0], [rw, rh] = d0.rec;
+    const L = [`# ---- from SensorLab: ${d0.dc_name} crop, ${ds.length} code(s) ` + '-'.repeat(Math.max(4, 40 - d0.dc_name.length)),
+      `[${sid}]`, `name     = ${sid} ${d0.vis[0]}x${d0.vis[1]}`,
+      `window   = ${d0.dcw}x${d0.dch}` + (d0.dc_name === 'Custom' ? '' : `            # SensorLab DC "${d0.dc_name}"`),
+      `record   = ${rw}x${rh}` + (rw !== d0.rw || rh !== d0.rh ? `            # SensorLab RES ${d0.rw}x${d0.rh}` : '')];
+    if (d0.scw !== d0.dcw || d0.sch !== d0.dch) L.push(`# note: SensorLab reads ${d0.scw}x${d0.sch} on the sensor grid for this crop`);
+    for (const bits of [...slots.keys()].sort((a, b) => a - b)) {
+      const lst = slots.get(bits), by = new Map();
+      for (const x of lst) { if (!by.has(x.readout)) by.set(x.readout, []); by.get(x.readout).push(x); }
+      const how = [...by].map(([r, g]) => `${r}: ${g[0].ad_bits}-bit converter, merge ${g[0].mh}x${g[0].mv}, hmax ${g[0].hmax}, ` +
+        `RS ${fl((g[0].rs + 50) / 1000)}.${fl((g[0].rs + 50) / 100) % 10} ms`).join('; ');
+      L.push(ljust(`readout ${bits} = ${[...by.keys()].join(' ')}`, 32) + `# ${how}`);
+      const x = lst[0];
+      if (x.hbin !== 1 || x.vbin !== 1) L.push(`isp_bin ${bits} = ${x.hbin}x${x.vbin}`);
+      if (x.kh !== 1 || x.kv !== 1 || x.km !== 0) L.push(`isp_filter ${bits} = ${KERNELS[x.kh]} ${KERNELS[x.kv]} ${x.km ? 'std' : 'soft'}`);
+      for (const y of lst) if (y.ad_bits === 14 && bits === 12) L.push(`# ${y.readout}: read at 14 bits, written as 12-bit (the ISP scales or bins)`);
+    }
+    const custom = [...new Set(ds.map(rateText).filter(Boolean))];
+    const made = [...new Set(ds.map(x => x.fps_text + (x.fps_how === 'standard' ? '' : ` (${x.fps_how})`)))].join(', ');
+    if (custom.length) L.push(ljust(`rates    = auto ${custom.join(' ')}`, 32) + `# auto = every standard rate the readouts reach; plus the code's own (${made} fps)`);
+    else L.push(`# rates: the default, every standard rate the readouts reach (code made at ${made} fps)`);
+    return L.join('\n') + '\n';
+  }
+  /* inputs: strings (codes or addresses); returns the text, throws CodeError */
+  function convert(inputs, id) {
+    const ds = inputs.map((t, i) => { try { return describe(decode(codeOf(t))); } catch (e) { throw new CodeError(`code ${i + 1}: ${e.message}`); } });
+    return sections(ds, id || null).map(([s, g]) => sectionText(s, g)).join('\n\n');
+  }
+  return {convert, decode, describe, CodeError};
+})();
+
+(() => {
+  const $ = id => document.getElementById(id);
+  if (!$('in')) return;
+  function run() {
+    const lines = $('in').value.split(/\s+/).filter(Boolean), id = $('id').value.trim();
+    $('err').textContent = ''; $('out').textContent = '';
+    if (!lines.length) return;
+    if (id && !/^[A-Za-z0-9_]{1,8}$/.test(id)) { $('err').textContent = 'Section id: 1–8 of A–Z 0–9 _'; return; }
+    try { $('out').textContent = QR2CFG.convert(lines, id); } catch (e) { $('err').textContent = e.message; }
+  }
+  $('in').addEventListener('input', run); $('id').addEventListener('input', run);
+  $('copy').addEventListener('click', () => { try { navigator.clipboard.writeText($('out').textContent); } catch (e) { /* no clipboard */ } });
+  const h = location.hash.slice(1); if (h) { $('in').value = h; run(); }      // opened with #<code>
+})();
+</script>
+</body>
+</html>
