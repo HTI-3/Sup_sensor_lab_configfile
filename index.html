@@ -112,7 +112,7 @@
   <section class="step" aria-labelledby="s1">
     <div class="step-head"><span class="num" aria-hidden="true">1</span><h2 id="s1">Paste links</h2></div>
     <p class="hint">The camera's QR code or the SensorLab page's address, one per line. A 12-bit and a 14-bit code of the same
-      crop and size become one format.</p>
+      crop and size become one format; a 14-bit link alone gets its 12-bit readout added (the camera needs one).</p>
     <label class="sr" for="in">Codes or addresses</label>
     <textarea id="in" spellcheck="false" autocapitalize="off" autocomplete="off"
       placeholder="https://ijigen.github.io/fpSup/sensor_lab_imx410/#…"></textarea>
@@ -151,6 +151,9 @@ const QR2CFG = (() => {
   const KEY_NAMES = ['14','12','12fast','12fastW','2x2','2x2fast','3x3','3x3fast','3x6','3x6fast','12v2','12v3','12h2','12h3',
     '12h2v3','12h3v2','f12v2','f12v3','f12h2','f12h3','f12h2v3','f12h3v2','14v2','14v3','12w18','f12w18','12w03','f12w03',
     '12w2C','f12v2w18','f12v2w2C','f12v3w18','f12v3w2C','12v2w18','12v2w2C','12v3w18','12v3w2C','14w2B','14v2w2B','14v3w2B'];
+  /* 2026-11-21: a section with only a 14-bit link gets this 12-bit readout added (the camera's 14 bit is the 12-bit
+   * format's twin, so it refuses a section without a 12-bit line). Same merge and width (core_data.h). */
+  const TWIN12 = {'14': '12', '14v2': '12v2', '14v3': '12v3', '14w2B': '12w2C', '14v2w2B': '12v2w2C', '14v3w2B': '12v3w2C'};
   const KERNELS = ['1,1,1', '1,2,1', '1,4,1', '1,6,1', '1,14,1', '0,1,0'];
   const STD = [23.976, 24, 25, 29.97, 30, 47.952, 48, 50, 59.94, 60, 72, 90, 96, 100, 119.88, 120, 144, 150, 180, 200,
     239.76, 240, 300, 360, 400, 480, 500, 600, 1000];
@@ -275,7 +278,7 @@ const QR2CFG = (() => {
       g.name = names[0] || '';
       const bits = new Set(g.items.map(it => it.d.record_bits));
       if (!g.error && names.length > 1) g.error = `links ${ns} are one section [${g.sid}] but have different names: give them the same name, or their own ids`;
-      if (!g.error && bits.has(14) && !bits.has(12)) g.error = `[${g.sid}] has only a 14-bit link: the camera needs a 12-bit link with the same id, crop and size too (14 bit is the 12-bit format's twin)`;
+      g.added12 = bits.has(14) && !bits.has(12);   // sectionText adds the 12-bit readout (TWIN12)
       if (!g.error && bits.has(14) && g.sid.length > 5) g.error = `[${g.sid}]: with a 14-bit link the id is at most 5 characters (the camera names the twin ${g.sid}14)`;
       if (!g.error) try { g.text = sectionText(g.sid, g.items.map(it => it.d), g.name); } catch (e) { g.error = e.message; }
     }
@@ -293,6 +296,13 @@ const QR2CFG = (() => {
       `window   = ${d0.dcw}x${d0.dch}` + (d0.dc_name === 'Custom' ? '' : `            # SensorLab DC "${d0.dc_name}"`),
       `record   = ${rw}x${rh}` + (rw !== d0.rw || rh !== d0.rh ? `            # SensorLab RES ${d0.rw}x${d0.rh}` : '')];
     if (d0.scw !== d0.dcw || d0.sch !== d0.dch) L.push(`# note: SensorLab reads ${d0.scw}x${d0.sch} on the sensor grid for this crop`);
+    if (slots.has(14) && !slots.has(12)) {        // only 14-bit codes: add their 12-bit twin (TWIN12)
+      const r14 = [...new Set(slots.get(14).map(x => x.readout))];
+      if (r14.some(r => !(r in TWIN12)))
+        throw new CodeError(`[${sid}] has only 14-bit code(s) (${r14.join(' ')}) and no known 12-bit twin: add a 12-bit code`);
+      L.push(ljust(`readout 12 = ${[...new Set(r14.map(r => TWIN12[r]))].join(' ')}`, 32) +
+        `# added: the camera needs a 12-bit line beside ${r14.join(' ')} (same crop and size)`);
+    }
     for (const bits of [...slots.keys()].sort((a, b) => a - b)) {
       const lst = slots.get(bits), by = new Map();
       for (const x of lst) { if (!by.has(x.readout)) by.set(x.readout, []); by.get(x.readout).push(x); }
@@ -392,7 +402,8 @@ const QR2CFG = (() => {
         it.L.idIn.placeholder = g.sid;
         it.L.nameIn.placeholder = shown;             // the name this link's format has now
         it.L.to.append(el('span', null, 'Format'), el('span', 'tag', `[${g.sid}]`),
-          el('span', null, `“${shown}”, ${bits}-bit` + (others.length ? `, with link ${others.join(', ')}` : '')));
+          el('span', null, `“${shown}”, ${bits}-bit` + (g.added12 && !g.error ? ' (its 12-bit readout added)' : '') +
+            (others.length ? `, with link ${others.join(', ')}` : '')));
         if (g.error) { it.L.msg.textContent = g.error; it.L.row.classList.add('bad'); }
       }
       if (!g.error) texts.push(g.text);
